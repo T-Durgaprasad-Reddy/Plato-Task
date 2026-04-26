@@ -106,6 +106,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # ---------- CORS ----------
 CORS_ALLOW_ALL_ORIGINS = True
 
+from corsheaders.defaults import default_headers
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'idempotency-key',
+]
+
 # ---------- Celery ----------
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'memory://')
 CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'cache+memory://')
