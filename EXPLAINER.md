@@ -121,7 +121,38 @@ except IntegrityError:
 
 **Why `get_or_create` isn't enough:** `get_or_create` has its own race window between the `get` and the `create`. We explicitly catch `IntegrityError` to handle it correctly.
 
-The idempotency key is stored in PostgreSQL, not Redis — a Redis key can expire, but a DB row is permanent, preventing duplicate payouts even after restarts.
+The idempotency key is stored in PostgreSQL on the `Payout` row itself — not in Redis. A Redis key can expire silently, creating a window where duplicate payouts could be triggered after TTL. DB rows never expire unintentionally.
+
+**24-hour expiry window:**
+
+Keys are valid for exactly 24 hours from the payout's `created_at`. After that, the client must generate a fresh UUID:
+
+```python
+# payouts/services.py
+IDEMPOTENCY_EXPIRY_HOURS = 24
+
+existing = Payout.objects.filter(
+    merchant_id=merchant_id, idempotency_key=idempotency_key
+).first()
+
+if existing:
+    expiry_cutoff = timezone.now() - timedelta(hours=IDEMPOTENCY_EXPIRY_HOURS)
+    if existing.created_at < expiry_cutoff:
+        raise ValidationError(
+            "Idempotency key has expired (older than 24h). "
+            "Please generate a new idempotency key."
+        )
+    return existing, True  # Within 24h — safe replay
+```
+
+| Scenario | Response |
+|----------|----------|
+| First request | `201 Created` — new payout |
+| Same key within 24h | `200 OK` — exact same payout replayed |
+| Same key after 24h | `400 Bad Request` — "key expired, generate a new one" |
+
+The `unique_together` DB constraint still holds, so even if a client retries the expired key, they will never accidentally create a duplicate payout — they'll get the 400 error every time.
+
 
 ---
 

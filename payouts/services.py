@@ -1,6 +1,10 @@
+import datetime
 from django.db import transaction, IntegrityError
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 from .models import Merchant, Payout, LedgerEntry, BankAccount
+
+IDEMPOTENCY_EXPIRY_HOURS = 24
 
 
 class PayoutService:
@@ -16,7 +20,9 @@ class PayoutService:
         Create a payout request with idempotency and concurrency safety.
         
         Flow:
-        1. Check if idempotency_key already used → return existing payout (replay)
+        1. Check if idempotency_key already used:
+           - Within 24h  → return existing payout (replay, 200 OK)
+           - Older than 24h → raise error: key expired, generate a new one
         2. Lock the merchant row with SELECT FOR UPDATE
         3. Check available_balance >= amount_paise
         4. Create Payout (status=pending) + LedgerEntry (type=HOLD) atomically
@@ -31,8 +37,18 @@ class PayoutService:
         existing = Payout.objects.filter(
             merchant_id=merchant_id, idempotency_key=idempotency_key
         ).first()
+
         if existing:
-            return existing, True  # Replay — return cached response
+            expiry_cutoff = timezone.now() - datetime.timedelta(hours=IDEMPOTENCY_EXPIRY_HOURS)
+            if existing.created_at < expiry_cutoff:
+                # Key is older than 24h — treat as expired.
+                # Do NOT replay; the client must generate a fresh UUID.
+                raise ValidationError(
+                    f"Idempotency key has expired (older than {IDEMPOTENCY_EXPIRY_HOURS}h). "
+                    "Please generate a new idempotency key."
+                )
+            # Within 24h window — safe replay
+            return existing, True
 
         # 2. Lock the merchant row to serialize balance checks
         # This is the critical concurrency primitive: SELECT ... FOR UPDATE

@@ -148,6 +148,45 @@ class IdempotencyTest(TransactionTestCase):
         ).count()
         self.assertEqual(hold_count, 1)
 
+    def test_expired_key_returns_400(self):
+        """
+        Idempotency key older than 24h must be rejected with 400.
+        We time-travel the payout's created_at to 25h ago using .update()
+        (bypasses auto_now_add so we can set an arbitrary past time).
+        """
+        from django.utils import timezone
+        import datetime
+
+        idem_key = str(uuid.uuid4())
+        payload = {
+            'amount_paise': 1000,
+            'bank_account_id': self.bank_account.id,
+            'merchant_id': self.merchant.id,
+        }
+
+        # Create the payout normally
+        resp1 = self.client.post(
+            '/api/v1/payouts/',
+            data=payload,
+            format='json',
+            HTTP_IDEMPOTENCY_KEY=idem_key,
+        )
+        self.assertEqual(resp1.status_code, status.HTTP_201_CREATED)
+
+        # Time-travel: set created_at to 25 hours ago (expired)
+        past = timezone.now() - datetime.timedelta(hours=25)
+        Payout.objects.filter(id=resp1.data['id']).update(created_at=past)
+
+        # Second request with same key — should now be rejected as expired
+        resp2 = self.client.post(
+            '/api/v1/payouts/',
+            data=payload,
+            format='json',
+            HTTP_IDEMPOTENCY_KEY=idem_key,
+        )
+        self.assertEqual(resp2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('expired', str(resp2.data).lower())
+
 
 class StateMachineTest(TransactionTestCase):
     """
